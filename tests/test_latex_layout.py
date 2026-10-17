@@ -11,6 +11,8 @@ from docx.oxml.ns import qn
 
 from latex_to_docx import (
     _attach_punctuation_to_links,
+    _bbl_entry_runs,
+    _replace_natbib_citations,
     _create_reference_docx,
     _display_math_blocks,
     _place_references_like_source,
@@ -143,6 +145,28 @@ class LatexLayoutTests(unittest.TestCase):
         self.assertEqual(len(blocks), 2)
         self.assertTrue(blocks[0].startswith(r"\["))
         self.assertTrue(blocks[1].startswith(r"\begin{align*}"))
+
+    def test_natbib_citations_are_written_like_the_pdf(self):
+        entries = {
+            "wang2023": {"short": "Wang et~al.", "year": "2023", "body": ""},
+            "wang2024": {"short": "Wang et~al.", "year": "2024", "body": ""},
+            "otter2020": {"short": "Otter et~al.", "year": "2020", "body": ""},
+        }
+        natbib = r"\usepackage[round,authoryear]{natbib}"
+        text = r"See \citep{wang2023,wang2024,otter2020} and \citet{otter2020}."
+        self.assertEqual(
+            _replace_natbib_citations(text, entries, natbib),
+            "See (Wang et~al., 2023, 2024; Otter et~al., 2020) and Otter et~al. (2020).")
+
+    def test_bbl_entry_keeps_italics_accents_and_dashes(self):
+        body = (r"Hernan Bocaccio and Marisol Dom{\'\i}nguez." "\n"
+                r"\newblock Dialects of cardinals." "\n"
+                r"\newblock \emph{Ecological Informatics}, 12\penalty0 (3):\penalty0 1--9, 2023.")
+        self.assertEqual(_bbl_entry_runs(body), [
+            ("Hernan Bocaccio and Marisol Domínguez. Dialects of cardinals. ", False),
+            ("Ecological Informatics", True),
+            (", 12(3):1\u20139, 2023.", False),
+        ])
 
     @unittest.skipUnless(shutil.which("pdflatex"), "pdflatex is not installed")
     def test_tables_and_equations_can_be_inserted_as_images(self):

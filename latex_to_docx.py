@@ -2346,6 +2346,241 @@ def _insert_equation_images(source_text, source_dir, output_path, work_dir, on_w
     return replaced
 
 
+_ACCENT_MARKS = {
+    "'": "\u0301", "`": "\u0300", '"': "\u0308", "^": "\u0302", "~": "\u0303",
+    "=": "\u0304", ".": "\u0307", "u": "\u0306", "v": "\u030c", "H": "\u030b",
+    "c": "\u0327", "k": "\u0328", "r": "\u030a",
+}
+_TEX_SYMBOLS = {
+    r"\i": "i", r"\j": "j", r"\ss": "ß", r"\o": "ø", r"\O": "Ø", r"\ae": "æ",
+    r"\AE": "Æ", r"\oe": "œ", r"\l": "ł", r"\L": "Ł", r"\&": "&", r"\%": "%",
+    r"\_": "_", r"\#": "#", r"\$": "$",
+}
+
+
+def _tex_accents_to_unicode(text):
+    """Turn BibTeX accent commands such as {\'\i} or {\"e} into Unicode letters."""
+    import unicodedata
+
+    def accent(match):
+        letter = _TEX_SYMBOLS.get("\\" + match.group(3), match.group(3)) if match.group(2) \
+            else match.group(3)
+        return unicodedata.normalize("NFC", letter + _ACCENT_MARKS[match.group(1)])
+
+    pattern = re.compile(
+        r"\{?\\(['`\"^~=.]|[uvHckr](?=[\s{]))\s*\{?(\\)?([A-Za-z])\}?\}?")
+    text = pattern.sub(accent, text)
+    for command, symbol in sorted(_TEX_SYMBOLS.items(), key=lambda item: -len(item[0])):
+        text = re.sub(re.escape(command) + r"(?![A-Za-z])\s?", symbol, text)
+    return text
+
+
+def _natbib_bbl_entries(source_path, source_text):
+    """Read natbib author-year entries from the .bbl LaTeX wrote for this source.
+
+    Returns {key: {"short", "year", "body"}} in .bbl order, or None when the
+    document does not use natbib or the .bbl is missing or incomplete.
+    """
+    source = _strip_tex_comments(source_text)
+    if not re.search(r"\\usepackage\s*(?:\[[^\]]*\])?\s*\{natbib\}", source):
+        return None
+    bbl_path = os.path.splitext(source_path)[0] + ".bbl"
+    if not os.path.isfile(bbl_path):
+        return None
+    with open(bbl_path, encoding="utf-8", errors="replace") as bbl_file:
+        bbl = bbl_file.read()
+    entries = {}
+    items = list(re.finditer(r"\\bibitem\s*\[", bbl))
+    for index, item in enumerate(items):
+        label, cursor = _read_tex_group(bbl, item.end() - 1, "[", "]")
+        key, cursor = _read_tex_group(bbl, cursor, "{", "}")
+        if label is None or key is None:
+            continue
+        end = items[index + 1].start() if index + 1 < len(items) else bbl.find(
+            r"\end{thebibliography}", cursor)
+        label = " ".join(label.split())
+        parsed = re.match(r"^(.*?)\((.*?)\)(.*)$", label, re.S)
+        if not parsed:
+            return None
+        year = re.sub(r"\\natexlab\{([^}]*)\}", r"\1", parsed.group(2))
+        entries[key.strip()] = {"short": parsed.group(1).strip(), "year": year.strip(),
+                                "body": bbl[cursor:end].strip()}
+    if not entries or not _source_citation_keys(source_text) <= set(entries):
+        return None
+    return entries
+
+
+_NATBIB_CITE_PATTERN = re.compile(
+    r"\\(citep|citet|citealp|citealt|citeauthor|citeyear|citeyearpar|cite)(\*?)(?![A-Za-z])")
+
+
+def _replace_natbib_citations(text, entries, source_text):
+    """Write natbib author-year citations as literal text, as the PDF prints them."""
+    options = re.search(r"\\usepackage\s*\[([^\]]*)\]\s*\{natbib\}", source_text)
+    square = bool(options and "square" in options.group(1))
+    left, right = ("[", "]") if square else ("(", ")")
+    pieces = []
+    cursor = 0
+    for match in _NATBIB_CITE_PATTERN.finditer(text):
+        if match.start() < cursor or _is_comment_offset(text, match.start()):
+            continue
+        position = match.end()
+        optional = []
+        while True:
+            while position < len(text) and text[position].isspace():
+                position += 1
+            if position < len(text) and text[position] == "[":
+                value, position = _read_tex_group(text, position, "[", "]")
+                optional.append(value or "")
+            else:
+                break
+        while position < len(text) and text[position].isspace():
+            position += 1
+        keys, position = _read_tex_group(text, position, "{", "}")
+        if keys is None:
+            continue
+        keys = [key.strip() for key in keys.split(",") if key.strip()]
+        if not keys or any(key not in entries for key in keys):
+            continue
+        prenote, postnote = ("", optional[0]) if len(optional) == 1 else (
+            tuple(optional[:2]) if len(optional) >= 2 else ("", ""))
+        command = match.group(1)
+        groups = []
+        for key in keys:
+            entry = entries[key]
+            if groups and groups[-1][0] == entry["short"]:
+                groups[-1][1].append(entry["year"])
+            else:
+                groups.append((entry["short"], [entry["year"]]))
+        if command in ("citet", "cite", "citealt"):
+            parts = [f"{author} {left}{', '.join(years)}{right}" if command != "citealt"
+                     else f"{author} {', '.join(years)}" for author, years in groups]
+            rendered = "; ".join(parts)
+        elif command == "citeauthor":
+            rendered = "; ".join(author for author, _ in groups)
+        elif command in ("citeyear", "citeyearpar"):
+            rendered = ", ".join(year for _, years in groups for year in years)
+            if command == "citeyearpar":
+                rendered = left + rendered + right
+        else:
+            rendered = "; ".join(f"{author}, {', '.join(years)}" for author, years in groups)
+            if prenote:
+                rendered = prenote + " " + rendered
+            if postnote:
+                rendered += ", " + postnote
+            if command == "citep":
+                rendered = left + rendered + right
+        pieces.append(text[cursor:match.start()])
+        pieces.append(rendered)
+        cursor = position
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _bbl_entry_runs(body):
+    """Split a .bbl entry into (text, italic) runs with LaTeX markup resolved."""
+    text = re.sub(r"\\newblock\s*", " ", body)
+    text = re.sub(r"\\penalty\d+\s*", "", text)
+    text = re.sub(r"\\natexlab\{([^}]*)\}", r"\1", text)
+    text = re.sub(r"\\(?:url|doi|href)\{([^}]*)\}(?:\{[^}]*\})?", r"\1", text)
+    text = _tex_accents_to_unicode(text)
+    text = text.replace("---", "\u2014").replace("--", "\u2013").replace("~", " ")
+    text = text.replace("``", "\u201c").replace("''", "\u201d")
+    runs = []
+
+    def walk(fragment, italic):
+        buffer = []
+        index = 0
+        while index < len(fragment):
+            emphasis = re.match(r"\\(emph|textit|textbf|textsc|textrm|mbox)\s*\{",
+                                fragment[index:])
+            if emphasis:
+                runs.append(("".join(buffer), italic))
+                buffer = []
+                inner, index = _read_tex_group(fragment, index + emphasis.end() - 1, "{", "}")
+                walk(inner or "", not italic if emphasis.group(1) in ("emph", "textit")
+                     else italic)
+                continue
+            if fragment.startswith("{\\em", index) or fragment.startswith("{\\it", index):
+                runs.append(("".join(buffer), italic))
+                buffer = []
+                inner, index = _read_tex_group(fragment, index, "{", "}")
+                walk(re.sub(r"^\\(?:em|it)\b\s*", "", inner or ""), not italic)
+                continue
+            character = fragment[index]
+            if character in "{}":
+                index += 1
+                continue
+            if character == "\\":
+                command = re.match(r"\\[A-Za-z]+\s*", fragment[index:])
+                index += command.end() if command else 2
+                continue
+            buffer.append(character)
+            index += 1
+        runs.append(("".join(buffer), italic))
+
+    walk(text, False)
+    merged = []
+    for value, italic in runs:
+        value = re.sub(r"\s+", " ", value)
+        if not value:
+            continue
+        if merged and merged[-1][1] == italic:
+            merged[-1] = (merged[-1][0] + value, italic)
+        else:
+            merged.append((value, italic))
+    if merged:
+        merged[0] = (merged[0][0].lstrip(), merged[0][1])
+        merged[-1] = (merged[-1][0].rstrip(), merged[-1][1])
+    return merged
+
+
+def _insert_bbl_references(source_text, output_path, entries):
+    """Write the reference list from the .bbl, where \\bibliography sits in the source."""
+    document = Document(output_path)
+    body = document.element.body
+    for paragraph in document.paragraphs:
+        if paragraph.style.name == "Bibliography":
+            paragraph._element.getparent().remove(paragraph._element)
+    try:
+        style = _style_by_name(document, "Bibliography")
+    except StopIteration:
+        style = document.styles.add_style("Bibliography", WD_STYLE_TYPE.PARAGRAPH)
+    _set_style_font(style, 12)
+    style.paragraph_format.left_indent = Inches(0.25)
+    style.paragraph_format.first_line_indent = Inches(-0.25)
+    style.paragraph_format.line_spacing = 1.5
+    style.paragraph_format.space_before = Pt(0)
+    style.paragraph_format.space_after = Pt(2)
+    style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    source = _strip_tex_comments(source_text)
+    bibliography = _BIBLIOGRAPHY_PATTERN.search(source)
+    appendix = re.search(r"\\appendix\b", source)
+    anchor = None
+    if bibliography and appendix and bibliography.start() < appendix.start():
+        anchor = next((paragraph._element for paragraph in document.paragraphs
+                       if paragraph.style.name.startswith("Heading")
+                       and paragraph.text.strip().startswith("Appendix")), None)
+    if anchor is None:
+        anchor = body.find(qn("w:sectPr"))
+
+    def place(paragraph):
+        if anchor is not None:
+            anchor.addprevious(paragraph._element)
+
+    if not any(paragraph.text.strip() == "References"
+               and paragraph.style.name.startswith("Heading")
+               for paragraph in document.paragraphs):
+        place(document.add_paragraph("References", style="Heading 1"))
+    for key, entry in entries.items():
+        paragraph = document.add_paragraph(style="Bibliography")
+        for value, italic in _bbl_entry_runs(entry["body"]):
+            paragraph.add_run(value).italic = italic or None
+        place(paragraph)
+    document.save(output_path)
+
+
 def _place_references_like_source(source_text, output_path):
     """Move the bibliography to where \\bibliography sits, e.g. before appendices.
 
@@ -2590,6 +2825,12 @@ def convert_latex_to_docx(source_path, destination_path, on_status=None, on_warn
 
     with open(source_path, encoding="utf-8", errors="replace") as source_file:
         source_text = source_file.read()
+    bbl_entries = _natbib_bbl_entries(source_path, source_text)
+    if bbl_entries:
+        # LaTeX already formatted the citations; reuse its .bbl instead of citeproc.
+        extra_args = [argument for argument in extra_args
+                      if not argument.startswith("--bibliography=")
+                      and argument != "--citeproc"]
     for message in _source_resource_warnings(source_text, source_dir):
         add_warning(message)
 
@@ -2598,6 +2839,8 @@ def convert_latex_to_docx(source_path, destination_path, on_status=None, on_warn
     cleaned_source = _normalize_minipage_tables(cleaned_source)
     cleaned_source = _normalize_table_markup(cleaned_source)
     cleaned_source = _normalize_includegraphics_options(cleaned_source)
+    if bbl_entries:
+        cleaned_source = _replace_natbib_citations(cleaned_source, bbl_entries, source_text)
 
     with tempfile.TemporaryDirectory(prefix="pdf2docx-latex-") as temp_dir:
         temp_source_path = os.path.join(temp_dir, os.path.basename(source_path))
@@ -2664,8 +2907,9 @@ def convert_latex_to_docx(source_path, destination_path, on_status=None, on_warn
                 source_text, destination_path)),
             ("Cross-references", lambda: _restore_cross_reference_numbers(
                 source_text, destination_path)),
-            ("References", lambda: _place_references_like_source(
-                source_text, destination_path)),
+            ("References", lambda: _insert_bbl_references(
+                source_text, destination_path, bbl_entries) if bbl_entries
+             else _place_references_like_source(source_text, destination_path)),
             ("Table widths", lambda: _preserve_latex_table_widths(
                 source_text, destination_path)),
             ("Wide figure panels", lambda: _preserve_wide_subfigure_tables(
