@@ -14,7 +14,7 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches, Mm, Pt
+from docx.shared import Inches, Mm, Pt, RGBColor
 from docx.text.paragraph import Paragraph
 
 
@@ -250,6 +250,7 @@ def _create_reference_docx(source_text, destination_path):
     _set_style_font(title, 17, bold=False)
     title.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title.paragraph_format.line_spacing = 1
+    title.paragraph_format.space_after = Pt(12)
     for name, size in (("Heading 1", 14), ("Heading 2", 12), ("Heading 3", 12)):
         heading = _style_by_name(document, name)
         _set_style_font(heading, size, bold=True, italic=False)
@@ -2609,6 +2610,57 @@ def _use_latex_caption_labels(source_text, output_path):
         document.save(output_path)
 
 
+def _style_value(style, getter):
+    """Return the first value a style or its base styles define."""
+    while style is not None:
+        value = getter(style)
+        if value is not None:
+            return value
+        style = style.base_style
+    return None
+
+
+def _apply_direct_formatting(output_path):
+    """Copy style formatting onto paragraphs and runs.
+
+    Pasting into Google Docs or another editor keeps direct formatting but
+    drops Word styles, so text would fall back to the editor's default font,
+    size, and spacing.
+    """
+    document = Document(output_path)
+    paragraphs = list(document.paragraphs)
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                paragraphs.extend(cell.paragraphs)
+    for paragraph in paragraphs:
+        style = paragraph.style
+        paragraph_format = paragraph.paragraph_format
+        for name in ("alignment", "line_spacing", "space_before", "space_after",
+                     "left_indent", "first_line_indent"):
+            if getattr(paragraph_format, name) is None:
+                value = _style_value(style, lambda item: getattr(item.paragraph_format, name))
+                if value is not None:
+                    setattr(paragraph_format, name, value)
+        size = _style_value(style, lambda item: item.font.size) or Pt(12)
+        name = _style_value(style, lambda item: item.font.name) or "Times New Roman"
+        bold = _style_value(style, lambda item: item.font.bold)
+        italic = _style_value(style, lambda item: item.font.italic)
+        for run in paragraph.runs:
+            if run.font.size is None:
+                run.font.size = size
+            if run.font.name is None:
+                run.font.name = name
+                run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), name)
+            if run.font.bold is None and bold:
+                run.font.bold = True
+            if run.font.italic is None and italic:
+                run.font.italic = True
+            if run.font.color.rgb is None:
+                run.font.color.rgb = RGBColor(0, 0, 0)
+    document.save(output_path)
+
+
 def _place_references_like_source(source_text, output_path):
     """Move the bibliography to where \\bibliography sits, e.g. before appendices.
 
@@ -2985,6 +3037,10 @@ def convert_latex_to_docx(source_path, destination_path, on_status=None, on_warn
             _use_latex_caption_labels(source_text, destination_path)
         except Exception as exc:
             add_warning(f"Caption labels: {exc}")
+        try:
+            _apply_direct_formatting(destination_path)
+        except Exception as exc:
+            add_warning(f"Direct formatting: {exc}")
 
     deliver_warnings()
     finish_stage()

@@ -10,6 +10,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from latex_to_docx import (
+    _apply_direct_formatting,
     _attach_punctuation_to_links,
     _bbl_entry_runs,
     _replace_natbib_citations,
@@ -167,6 +168,24 @@ class LatexLayoutTests(unittest.TestCase):
             ("Ecological Informatics", True),
             (", 12(3):1\u20139, 2023.", False),
         ])
+
+    def test_style_formatting_is_copied_onto_runs_for_pasting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            document = Document(_reference_document(directory))
+            document.add_paragraph("Results", style="Heading 1")
+            document.add_paragraph("Body text.", style="Body Text")
+            path = os.path.join(directory, "out.docx")
+            document.save(path)
+
+            _apply_direct_formatting(path)
+
+            paragraphs = {p.text: p for p in Document(path).paragraphs}
+            heading = paragraphs["Results"].runs[0].font
+            body = paragraphs["Body text."]
+            self.assertEqual((heading.size.pt, heading.bold, heading.name),
+                             (14, True, "Times New Roman"))
+            self.assertEqual(body.runs[0].font.size.pt, 12)
+            self.assertEqual(body.paragraph_format.line_spacing, 1.5)
 
     @unittest.skipUnless(shutil.which("pdflatex"), "pdflatex is not installed")
     def test_tables_and_equations_can_be_inserted_as_images(self):
