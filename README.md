@@ -98,19 +98,28 @@ python pdf2docx_gui.py
 
 1. Select **TEX to DOCX** and choose or drop the main `.tex` source file.
 2. Keep its figures and bibliography in the source folder at their referenced paths.
-3. Confirm the output (defaults to `<source-name>_from_tex.docx`) and click **Convert**.
-4. Watch **Stages completed** and the current operation. The percentage advances
-   when a conversion stage finishes; the activity ring keeps moving while Pandoc
-   works without reporting intermediate progress.
-5. Click **Open DOCX** after saving to open the document in your default app.
+   For natbib papers, compile once with `latexmk` first so the `.bbl` is current.
+3. Confirm the output (defaults to `docx/<source-name>_from_tex.docx` next to the
+   source; the folder is created) and click **Convert**.
+4. **Insert tables and equations as images** is on by default. Uncheck it for
+   editable Word tables and equations.
+5. Watch **Stages completed**, then click **Open DOCX**.
 
-Pandoc reads the source directly; a LaTeX installation is not required. It
-keeps figure captions, subfigure labels such as **(a)** and **(b)**, and image
-proportions, creates editable Word tables and
-equations, and carries common paper-size and margin settings into Word. The
-document uses a 12 pt Times-style academic layout with 1.5 spacing. Custom
-macros or packages Pandoc does not understand may need source changes or manual
-cleanup.
+The result is meant to be a final deliverable that looks like the LaTeX PDF:
+
+| Element | Word output |
+|---|---|
+| Title block | Centered title (not bold); authors on one line with superscript affiliation numbers; `authblk` affiliations below |
+| Text | 12 pt Times New Roman, 1.5 spacing, justified; headings, title, citations and cross-references black (no Word theme blue, no link underline) |
+| Captions | Bold label with LaTeX's separator, e.g. **Figure 1:** / **Table 1:** (`labelsep=period` keeps "Figure 1.") |
+| Figures | Original image files; a figure with subfigure panels (a)(b)(c) becomes one picture rendered by `pdflatex`, exactly as in the PDF |
+| Tables, display equations | Rendered by `pdflatex` and inserted as cropped pictures (default), or editable Word tables/equations when unchecked |
+| Citations, references | natbib papers reuse LaTeX's `.bbl`: in-text "(Wang et al., 2023, 2024)", reference list in the PDF's style and order with a hanging indent, placed where `\bibliography` is (e.g. after Funding, before the appendices) |
+| Line breaks | Punctuation after a citation or cross-reference stays on the same line |
+
+Rendering tables, equations and multi-panel figures needs a LaTeX installation
+(`pdflatex`). Without it, or if one item fails to compile, that item stays
+editable and the page lists it under **Saved with warnings**.
 
 If Pandoc can save a usable document while reporting missing figures, tables,
 or references, the page shows **Saved with warnings** and lists the affected
@@ -123,8 +132,15 @@ python pdf2docx_gui.py --cli input.pdf [output.docx] [--no-images] [--no-tidy]
 ```
 
 `--no-images` converts tables and equations as text, as the tool did before.
-`--no-tidy` skips the document cleanup pass. The CLI currently handles PDF
-input; use the GUI page for LaTeX conversion.
+`--no-tidy` skips the document cleanup pass.
+
+```bash
+python pdf2docx_gui.py --cli paper.tex [output.docx] [--editable]
+```
+
+Converts a LaTeX source with the same defaults as the **TEX to DOCX** page and
+saves to `docx/paper_from_tex.docx`. `--editable` keeps tables and equations
+editable instead of inserting them as pictures.
 
 ## Checking the result
 

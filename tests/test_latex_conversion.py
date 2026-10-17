@@ -302,7 +302,7 @@ See \citep{missing2024}.
             self.assertTrue(any(run.bold and "Left panel" in run.text for run in captions[0].runs))
             self.assertIsNotNone(captions[0]._p.find(".//" + qn("m:oMath")))
             self.assertEqual([p.text for p in document.paragraphs if p.style.name == "Image Caption"],
-                             ["Figure 1. First figure.", "Figure 2. Second figure."])
+                             ["Figure 1: First figure.", "Figure 2: Second figure."])
 
             _restore_figure_caption_labels(source, output_path)
             reopened = Document(output_path)
@@ -591,7 +591,7 @@ See Appendix~\ref{app:details}.
             self.assertIn("A Useful Paper", document_text)
             self.assertIn("Pixel plot", document_text)
             self.assertIn("Wide pixel plot", document_text)
-            self.assertIn("Table 1. Numeric results", document_text)
+            self.assertIn("Table 1: Numeric results", document_text)
             normalized_text = " ".join(document_text.replace("\xa0", " ").split())
             self.assertIn("See Table 1 and Figure 1.", normalized_text)
             self.assertIn("See Appendix A.", normalized_text)
@@ -604,15 +604,15 @@ See Appendix~\ref{app:details}.
                 paragraph for paragraph in document.paragraphs
                 if paragraph.style.name == "Image Caption"]
             self.assertTrue(any(
-                paragraph.text == "Figure 1. Pixel plot"
+                paragraph.text == "Figure 1: Pixel plot"
                 for paragraph in figure_captions))
             self.assertTrue(any(
-                paragraph.runs and paragraph.runs[0].text == "Figure 1."
+                paragraph.runs and paragraph.runs[0].text == "Figure 1:"
                 and paragraph.runs[0].bold
                 for paragraph in figure_captions))
             table_caption = next(
                 paragraph for paragraph in document.paragraphs
-                if paragraph.text.startswith("Table 1."))
+                if paragraph.text.startswith("Table 1:"))
             self.assertEqual(table_caption.style.name, "Table Caption")
             heading = next(
                 paragraph for paragraph in document.paragraphs

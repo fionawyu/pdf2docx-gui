@@ -2581,6 +2581,34 @@ def _insert_bbl_references(source_text, output_path, entries):
     document.save(output_path)
 
 
+def _caption_label_separator(source_text):
+    """Return the caption label separator LaTeX prints (":" unless set otherwise)."""
+    source = _strip_tex_comments(source_text)
+    setting = re.search(r"labelsep\s*=\s*([A-Za-z]+)", source)
+    return {"period": ".", "colon": ":", "space": "", "quad": "",
+            "newline": ":", "endash": " –"}.get(setting.group(1), ":") \
+        if setting else ":"
+
+
+def _use_latex_caption_labels(source_text, output_path):
+    """Print caption labels as LaTeX does, e.g. "Figure 1:" instead of "Figure 1."."""
+    separator = _caption_label_separator(source_text)
+    if separator == ".":
+        return
+    document = Document(output_path)
+    changed = False
+    for paragraph in document.paragraphs:
+        if not paragraph.runs:
+            continue
+        run = paragraph.runs[0]
+        if re.fullmatch(r"(Figure|Table) \d+\.", run.text or ""):
+            run.text = run.text[:-1] + separator
+            run.bold = True
+            changed = True
+    if changed:
+        document.save(output_path)
+
+
 def _place_references_like_source(source_text, output_path):
     """Move the bibliography to where \\bibliography sits, e.g. before appendices.
 
@@ -2790,6 +2818,7 @@ def convert_latex_to_docx(source_path, destination_path, on_status=None, on_warn
 
     warnings = []
     completed_stages = 0
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
 
     def report_status(message):
         if on_status:
@@ -2952,6 +2981,10 @@ def convert_latex_to_docx(source_path, destination_path, on_status=None, on_warn
             add_warning(f"DOCX content audit could not finish: {exc}")
         finish_stage()
         report_status("Finalizing DOCX...")
+        try:
+            _use_latex_caption_labels(source_text, destination_path)
+        except Exception as exc:
+            add_warning(f"Caption labels: {exc}")
 
     deliver_warnings()
     finish_stage()

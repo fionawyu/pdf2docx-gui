@@ -60,6 +60,21 @@ def convert_cli(src, dst, snip=True, tidy=True):
     print(dst)
 
 
+def convert_tex_cli(src, dst=None, as_images=True):
+    """Convert a .tex file the way the LaTeX page does, printing any warnings."""
+    from fluent_ui import _default_tex_output
+    from latex_to_docx import convert_latex_to_docx
+
+    dst = dst or _default_tex_output(src)
+    warnings = []
+    convert_latex_to_docx(src, dst, on_warning=warnings.append,
+                          tables_as_images=as_images, equations_as_images=as_images)
+    for message in warnings:
+        print("warning:", message)
+    print(dst)
+    return 0
+
+
 def main():
     args = [arg for arg in sys.argv[1:] if not arg.startswith("-")]
     flags = {arg for arg in sys.argv[1:] if arg.startswith("-")}
@@ -67,9 +82,13 @@ def main():
     if "--cli" in flags:
         if not args:
             print("usage: pdf2docx_gui.py --cli input.pdf [output.docx] "
-                  "[--no-images] [--no-tidy]")
+                  "[--no-images] [--no-tidy]\n"
+                  "       pdf2docx_gui.py --cli paper.tex [output.docx] [--editable]")
             return 2
         src = os.path.abspath(args[0])
+        if src.lower().endswith(".tex"):
+            return convert_tex_cli(src, os.path.abspath(args[1]) if len(args) > 1 else None,
+                                   as_images="--editable" not in flags)
         dst = (os.path.abspath(args[1]) if len(args) > 1 else
                os.path.splitext(src)[0] + ".docx")
         convert_cli(src, dst,

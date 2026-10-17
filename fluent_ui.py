@@ -400,7 +400,9 @@ class PdfConverterPage(QWidget):
 
 
 def _default_tex_output(source_path):
-    return os.path.splitext(source_path)[0] + "_from_tex.docx"
+    """Save next to the source in a docx/ folder, e.g. paper/docx/paper_from_tex.docx."""
+    folder, name = os.path.split(os.path.splitext(source_path)[0])
+    return os.path.join(folder, "docx", name + "_from_tex.docx")
 
 
 class TexConverterPage(QWidget):
@@ -448,7 +450,7 @@ class TexConverterPage(QWidget):
         output_layout.addLayout(output_row)
         self.images_option = CheckBox(
             "Insert tables and equations as images", output_card)
-        self.images_option.setChecked(False)
+        self.images_option.setChecked(True)
         output_layout.addWidget(self.images_option)
         images_help = CaptionLabel(
             "Renders them with LaTeX so they look exactly like the PDF. "

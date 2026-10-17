@@ -54,7 +54,7 @@ class FluentUiTests(unittest.TestCase):
 
         self.assertFalse(page.set_input("paper.pdf"))
         self.assertTrue(page.set_input("/tmp/paper.tex"))
-        self.assertEqual(page.output_edit.text(), "/tmp/paper_from_tex.docx")
+        self.assertEqual(page.output_edit.text(), "/tmp/docx/paper_from_tex.docx")
         self.assertTrue(page.convert_button.isEnabled())
 
     def test_progress_bar_animates_only_while_conversion_is_busy(self):
@@ -255,7 +255,7 @@ class FluentUiTests(unittest.TestCase):
         self.assertEqual(progress, [14, 100])
 
     def test_tex_page_shows_saved_with_warnings_after_worker_signal(self):
-        def convert(src, dst, on_status, on_warning, on_progress):
+        def convert(src, dst, on_status, on_warning, on_progress, **options):
             Path(dst).touch()
             on_progress(50)
             on_warning("Figure 3: image path is missing.png")
@@ -283,7 +283,7 @@ class FluentUiTests(unittest.TestCase):
     def test_tex_failure_keeps_last_progress_and_next_run_resets_it(self):
         attempts = []
 
-        def convert(src, dst, on_status, on_warning, on_progress):
+        def convert(src, dst, on_status, on_warning, on_progress, **options):
             attempts.append(True)
             on_progress(21)
             if len(attempts) == 1:
@@ -318,7 +318,7 @@ class FluentUiTests(unittest.TestCase):
             Path(dst).touch()
             return {"images": None, "polish": None}
 
-        def convert_tex(src, dst, on_status, on_warning, on_progress):
+        def convert_tex(src, dst, on_status, on_warning, on_progress, **options):
             Path(dst).touch()
             on_progress(100)
             return dst

@@ -195,7 +195,7 @@ Text before.
             self.assertEqual(len(Document(editable).inline_shapes), 0)
             converted = Document(pictures)
             self.assertEqual(len(converted.inline_shapes), 2)
-            caption = next(p for p in converted.paragraphs if p.text.startswith("Table 1."))
+            caption = next(p for p in converted.paragraphs if p.text.startswith("Table 1:"))
             picture = caption._p.getnext()
             self.assertIsNotNone(next(picture.iter(qn("w:drawing")), None))
             self.assertEqual(len(converted.element.body.findall(".//" + qn("m:oMathPara"))), 0)

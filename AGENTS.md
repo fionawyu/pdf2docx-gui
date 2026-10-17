@@ -23,3 +23,16 @@ Recent commits use short Conventional Commit prefixes such as `feat:` and `docs:
 ## Configuration & Local Files
 
 Conversion runs locally and needs no credentials. Keep virtual environments and generated `.docx` outputs out of commits; `.gitignore` already excludes them.
+
+## LaTeX Output Requirements
+
+The TEX to DOCX output must look like the LaTeX PDF and be usable as a final deliverable without manual cleanup. Keep these behaviours when changing `latex_to_docx.py` (README "TEX to DOCX" lists them with details):
+
+- Black text everywhere: no Word theme colours on title or headings, no blue or underlined links; Times New Roman, justified body, 1.5 spacing.
+- Title block: one centered author line with superscript affiliation numbers, followed by the `authblk` affiliations.
+- Caption labels in bold with LaTeX's separator (`Figure 1:` by default).
+- Multi-panel (subfigure) figures as one pdflatex-rendered picture; tables and display equations as pdflatex-rendered pictures by default (GUI checkbox / CLI `--editable` for editable output).
+- natbib papers: citations and references from the `.bbl`, reference list placed where `\bibliography` sits.
+- No line may start with punctuation that follows a citation or cross-reference.
+- Default output: `docx/<name>_from_tex.docx` next to the source.
+
