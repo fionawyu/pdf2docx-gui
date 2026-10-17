@@ -446,6 +446,15 @@ class TexConverterPage(QWidget):
         self.output_browse_button.clicked.connect(self._browse_output)
         output_row.addWidget(self.output_browse_button)
         output_layout.addLayout(output_row)
+        self.images_option = CheckBox(
+            "Insert tables and equations as images", output_card)
+        self.images_option.setChecked(False)
+        output_layout.addWidget(self.images_option)
+        images_help = CaptionLabel(
+            "Renders them with LaTeX so they look exactly like the PDF. "
+            "Leave unchecked for editable Word tables and equations.", output_card)
+        images_help.setWordWrap(True)
+        output_layout.addWidget(images_help)
         layout.addWidget(output_card)
 
         footer = QHBoxLayout()
@@ -547,15 +556,18 @@ class TexConverterPage(QWidget):
         self.output_edit.setText(destination)
         self._warnings.clear()
         self.status_label.setText("Converting LaTeX to Word...")
+        image_options = ({"tables_as_images": True, "equations_as_images": True}
+                         if self.images_option.isChecked() else {})
         _start_worker(
             self, self.converter, self.input_path, destination,
-            report_warnings=True, report_progress=True)
+            report_warnings=True, report_progress=True, **image_options)
 
     def _set_busy(self, busy):
         self.setAcceptDrops(not busy)
         self.drop_zone.setEnabled(not busy)
         self.output_edit.setEnabled(not busy)
         self.output_browse_button.setEnabled(not busy)
+        self.images_option.setEnabled(not busy)
         self.convert_button.setEnabled(not busy and self.input_path is not None)
         self.open_button.setEnabled(
             not busy and self._last_output_path is not None

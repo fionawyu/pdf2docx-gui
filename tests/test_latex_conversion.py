@@ -579,7 +579,7 @@ See Appendix~\ref{app:details}.
             self.assertIn("Converting LaTeX with Pandoc...", statuses)
             self.assertIn("Checking DOCX content...", statuses)
             self.assertEqual(statuses[-1], "Finalizing DOCX...")
-            self.assertEqual(progress, [round(stage * 100 / 14) for stage in range(15)])
+            self.assertEqual(progress, [round(stage * 100 / 20) for stage in range(21)])
             document = Document(destination_path)
             document_text = "\n".join(
                 [paragraph.text for paragraph in document.paragraphs]

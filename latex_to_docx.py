@@ -141,6 +141,38 @@ def _style_by_name(document, name):
     return next(style for style in document.styles if style.name == name)
 
 
+def _use_black_text(style):
+    """Drop Word theme colours and fonts so the style prints like LaTeX output."""
+    rpr = style._element.get_or_add_rPr()
+    fonts = rpr.get_or_add_rFonts()
+    for attribute in ("w:asciiTheme", "w:hAnsiTheme", "w:eastAsiaTheme", "w:cstheme"):
+        fonts.attrib.pop(qn(attribute), None)
+    for attribute in ("w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"):
+        fonts.set(qn(attribute), "Times New Roman")
+    color = rpr.find(qn("w:color"))
+    if color is None:
+        color = OxmlElement("w:color")
+        rpr.append(color)
+    for attribute in ("w:themeColor", "w:themeShade", "w:themeTint"):
+        color.attrib.pop(qn(attribute), None)
+    color.set(qn("w:val"), "000000")
+
+
+def _use_black_theme_styles(document):
+    """Make titles, headings, and links black instead of Word's accent blue."""
+    for style in document.styles:
+        rpr = style._element.find(qn("w:rPr"))
+        color = rpr.find(qn("w:color")) if rpr is not None else None
+        uses_accent = (color is not None
+                       and color.get(qn("w:themeColor"), "").startswith("accent"))
+        if uses_accent or style.name in ("Title", "Hyperlink"):
+            _use_black_text(style)
+    try:
+        _style_by_name(document, "Hyperlink").font.underline = False
+    except StopIteration:
+        pass
+
+
 def _ensure_table_caption_style(document):
     try:
         return _style_by_name(document, "Table Caption")
@@ -191,6 +223,8 @@ def _create_reference_docx(source_text, destination_path):
         style.paragraph_format.line_spacing = 1.5
         style.paragraph_format.space_before = None
         style.paragraph_format.space_after = Pt(6)
+        if name != "Bibliography":
+            style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     try:
         _style_by_name(document, "Abstract").paragraph_format.keep_with_next = True
     except StopIteration:
@@ -213,7 +247,7 @@ def _create_reference_docx(source_text, destination_path):
         pass
 
     title = _style_by_name(document, "Title")
-    _set_style_font(title, 17, bold=True)
+    _set_style_font(title, 17, bold=False)
     title.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title.paragraph_format.line_spacing = 1
     for name, size in (("Heading 1", 14), ("Heading 2", 12), ("Heading 3", 12)):
@@ -237,7 +271,69 @@ def _create_reference_docx(source_text, destination_path):
             _set_style_font(_style_by_name(document, name), 12)
         except KeyError:
             pass
+    _use_black_theme_styles(document)
     document.save(destination_path)
+
+
+_AUTHOR_PATTERN = re.compile(r"\\author\s*(?:\[([^\]]*)\])?\s*\{([^{}]*)\}")
+_AFFILIATION_PATTERN = re.compile(r"\\affil\s*(?:\[([^\]]*)\])?\s*\{([^{}]*)\}")
+
+
+def _title_block_records(source_text):
+    """Return (authors, affiliations) from authblk-style \\author/\\affil commands."""
+    text = _strip_tex_comments(source_text)
+    preamble = text.split(r"\begin{document}", 1)[0]
+    authors = [(mark or "", name.strip()) for mark, name in _AUTHOR_PATTERN.findall(preamble)]
+    affiliations = [(mark or "", name.strip())
+                    for mark, name in _AFFILIATION_PATTERN.findall(preamble)]
+    return authors, affiliations
+
+
+def _clear_runs(paragraph):
+    for run in list(paragraph.runs):
+        run._element.getparent().remove(run._element)
+
+
+def _restore_title_block(source_text, output_path):
+    """Put authors on one centered line and add authblk affiliations below them.
+
+    Pandoc writes one Author paragraph per \\author and drops \\affil entirely.
+    """
+    authors, affiliations = _title_block_records(source_text)
+    if len(authors) < 2 and not affiliations:
+        return
+    document = Document(output_path)
+    author_paragraphs = [paragraph for paragraph in document.paragraphs
+                         if paragraph.style.name == "Author"]
+    if not author_paragraphs:
+        return
+    first = author_paragraphs[0]
+    for paragraph in author_paragraphs[1:]:
+        paragraph._element.getparent().remove(paragraph._element)
+    _clear_runs(first)
+    first.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for index, (mark, name) in enumerate(authors):
+        if index:
+            first.add_run(", and " if index == len(authors) - 1 and len(authors) > 2
+                          else (" and " if index == len(authors) - 1 else ", "))
+        first.add_run(name)
+        if mark and affiliations:
+            first.add_run(mark).font.superscript = True
+
+    anchor = first
+    for mark, name in affiliations:
+        element = deepcopy(first._element)
+        anchor._element.addnext(element)
+        paragraph = Paragraph(element, first._parent)
+        _clear_runs(paragraph)
+        if mark:
+            paragraph.add_run(mark).font.superscript = True
+        paragraph.add_run(name).font.size = Pt(11)
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+        anchor = paragraph
+    anchor.paragraph_format.space_after = Pt(12)
+    document.save(output_path)
 
 
 def _is_comment_offset(text, offset):
@@ -1954,12 +2050,390 @@ def _pandoc_warning_messages(log_path, source_path=None, temporary_source=None):
     return warnings
 
 
-def _audit_converted_document(source_text, source_dir, output_path):
+def _multi_panel_figure_records(source_text):
+    """Figures whose subfigure panels should appear as one picture, as in the PDF."""
+    return [record for record in _figure_caption_records(source_text)
+            if _named_environment_ranges(record["float"], {"subfigure"})]
+
+
+_MACRO_DEFINITION_PATTERN = re.compile(
+    r"\\(?:newcommand|renewcommand|providecommand|newcolumntype)\*?(?![A-Za-z])")
+
+
+def _body_macro_definitions(source_text):
+    """Return macro definitions made after \\begin{document}, e.g. table cell helpers."""
+    parts = source_text.split(r"\begin{document}", 1)
+    if len(parts) < 2:
+        return ""
+    body = parts[1]
+    definitions = []
+    for match in _MACRO_DEFINITION_PATTERN.finditer(body):
+        if _is_comment_offset(body, match.start()):
+            continue
+        cursor = match.end()
+        groups = 0
+        while cursor < len(body) and groups < 2:
+            while cursor < len(body) and body[cursor].isspace():
+                cursor += 1
+            if cursor >= len(body):
+                break
+            if body[cursor] == "[":
+                _, cursor = _read_tex_group(body, cursor, "[", "]")
+            elif body[cursor] == "{":
+                _, cursor = _read_tex_group(body, cursor, "{", "}")
+                groups += 1
+            elif body[cursor] == "\\" and groups == 0:
+                end = cursor + 1
+                while end < len(body) and body[end].isalpha():
+                    end += 1
+                cursor, groups = end, 1
+            else:
+                break
+        definition = body[match.start():cursor]
+        if groups == 2 and not re.search(r"\\(?:array|baseline)stretch\b", definition):
+            definitions.append(definition)
+    return "\n".join(definitions)
+
+
+def _standalone_figure_source(source_text, figure_block):
+    """Return a one-page LaTeX document showing a figure's panels without its caption."""
+    return _standalone_float_source(source_text, figure_block, "figure")
+
+
+def _standalone_float_source(source_text, float_block, float_type):
+    """Return a one-page LaTeX document showing a float's body without its caption."""
+    preamble = source_text.split(r"\begin{document}", 1)[0]
+    inner = re.sub(r"^\s*\\begin\s*\{(?:figure|table)\*?\}\s*(\[[^\]]*\])?", "",
+                   float_block)
+    inner = re.sub(r"\\end\s*\{(?:figure|table)\*?\}\s*$", "", inner)
+    subfigures = _named_environment_ranges(inner, {"subfigure"})
+    removals = []
+    for match in _CAPTION_PATTERN.finditer(inner):
+        if _is_comment_offset(inner, match.start()) or any(
+                left < match.start() < right for left, right in subfigures):
+            continue
+        cursor = match.end()
+        while cursor < len(inner) and inner[cursor].isspace():
+            cursor += 1
+        if cursor < len(inner) and inner[cursor] == "[":
+            _, cursor = _read_tex_group(inner, cursor, "[", "]")
+        caption, cursor = _read_tex_group(inner, cursor, "{", "}")
+        if caption is not None:
+            removals.append((match.start(), cursor))
+    for start, end in reversed(removals):
+        inner = inner[:start] + inner[end:]
+    return (preamble + "\\begin{document}\n" + _body_macro_definitions(source_text)
+            + "\n\\pagestyle{empty}\n"
+            "\\noindent\\begin{minipage}{\\textwidth}\n"
+            + (f"\\captionsetup{{type={float_type}}}\n"
+               if re.search(r"\\usepackage(?:\[[^\]]*\])?\{[^}]*\b(?:sub)?caption\b", preamble)
+               else "")
+            + inner.strip() + "\n"
+            "\\end{minipage}\n\\end{document}\n")
+
+
+def _render_figure_png(tex_source, work_dir, source_dir, jobname, dpi=300):
+    """Compile a standalone figure with pdflatex and crop it to its content."""
+    try:
+        import pymupdf as fitz
+    except ImportError:  # older PyMuPDF releases only provide the fitz name
+        import fitz
+
+    tex_path = os.path.join(work_dir, jobname + ".tex")
+    with open(tex_path, "w", encoding="utf-8") as tex_file:
+        tex_file.write(tex_source)
+    subprocess.run(
+        ["pdflatex", "-interaction=nonstopmode", "-halt-on-error",
+         f"-output-directory={work_dir}", tex_path],
+        cwd=source_dir, check=True, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, timeout=180)
+    with fitz.open(os.path.join(work_dir, jobname + ".pdf")) as pdf:
+        page = pdf[0]
+        rects = [fitz.Rect(block["bbox"]) for block in page.get_text("dict")["blocks"]]
+        rects += [drawing["rect"] for drawing in page.get_drawings()]
+        rects += [fitz.Rect(image["bbox"]) for image in page.get_image_info()]
+        # Table rules are often drawn as zero-height lines, which PyMuPDF calls
+        # "empty"; keep them so \\toprule and \\bottomrule stay in the crop.
+        rects = [rect for rect in rects
+                 if not rect.is_infinite and (rect.width > 0 or rect.height > 0)]
+        if not rects:
+            raise RuntimeError("the compiled figure page is empty")
+        # Union by coordinates: PyMuPDF's rect union skips zero-height rules.
+        clip = fitz.Rect(min(rect.x0 for rect in rects), min(rect.y0 for rect in rects),
+                         max(rect.x1 for rect in rects), max(rect.y1 for rect in rects))
+        clip = (clip + (-3, -3, 3, 3)) & page.rect
+        png_path = os.path.join(work_dir, jobname + ".png")
+        page.get_pixmap(dpi=dpi, clip=clip).save(png_path)
+    return png_path, clip.width / 72
+
+
+def _insert_multi_panel_figures(source_text, source_dir, output_path, work_dir,
+                                on_warning=None):
+    """Replace subfigure grids with one LaTeX-rendered picture per figure.
+
+    Returns the figure blocks that were replaced, so the content audit can
+    count each of them as a single image.
+    """
+    records = _multi_panel_figure_records(source_text)
+    if not records:
+        return []
+    document = Document(output_path)
+    section = document.sections[0]
+    text_width = (section.page_width - section.left_margin - section.right_margin) / 914400
+    skipped = {qn("w:bookmarkStart"), qn("w:bookmarkEnd")}
+    replaced = []
+    for record in records:
+        caption = next((paragraph for paragraph in document.paragraphs
+                        if paragraph.text.strip().startswith(record["prefix"])), None)
+        if caption is None:
+            continue
+        panels = []
+        sibling = caption._element.getprevious()
+        while sibling is not None:
+            if sibling.tag in skipped:
+                sibling = sibling.getprevious()
+                continue
+            has_drawing = next(sibling.iter(qn("w:drawing")), None) is not None
+            if sibling.tag == qn("w:tbl") or (sibling.tag == qn("w:p") and has_drawing):
+                panels.append(sibling)
+                sibling = sibling.getprevious()
+                continue
+            break
+        if not panels:
+            continue
+        try:
+            png_path, width = _render_figure_png(
+                _standalone_figure_source(source_text, record["float"]),
+                work_dir, source_dir, f"figure{record['number']}")
+        except Exception as exc:
+            if on_warning:
+                on_warning(f"Figure {record['number']}: panels kept separate "
+                           f"because the figure could not be rendered ({exc}).")
+            continue
+        picture = document.add_paragraph()
+        picture.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        picture.paragraph_format.keep_with_next = True
+        picture.add_run().add_picture(png_path, width=Inches(min(width, text_width)))
+        caption._element.addprevious(picture._element)
+        for panel in panels:
+            panel.getparent().remove(panel)
+        replaced.append(record["float"])
+    document.save(output_path)
+    return replaced
+
+
+def _insert_table_images(source_text, source_dir, output_path, work_dir, on_warning=None):
+    """Replace each numbered table with a LaTeX-rendered picture of the table body.
+
+    The caption stays as editable Word text above the picture. Returns the
+    table float blocks that were replaced.
+    """
+    records = [record for record in _table_float_records(source_text)
+               if not record["starred"]]
+    if not records:
+        return []
+    document = Document(output_path)
+    section = document.sections[0]
+    text_width = (section.page_width - section.left_margin - section.right_margin) / 914400
+    skipped = {qn("w:bookmarkStart"), qn("w:bookmarkEnd")}
+    replaced = []
+    for record in records:
+        marker = f"Table {record['number']}."
+        caption = next((paragraph for paragraph in document.paragraphs
+                        if paragraph.text.strip().startswith(marker)), None)
+        if caption is None:
+            continue
+        float_text = _normalized_text(_plain_caption_text(record["float"]))
+        parts = []
+        node = caption._element.getnext()
+        while node is not None:
+            text = "".join(item.text or "" for item in node.iter(qn("w:t"))).strip()
+            if node.tag in skipped or node.tag == qn("w:tbl"):
+                parts.append(node)
+            elif node.tag == qn("w:p") and next(node.iter(qn("w:drawing")), None) is None and (
+                    not text or _normalized_text(text)[:20] in float_text):
+                # Empty spacers and panel headings such as "A. Species ..." belong
+                # to the float; ordinary body text does not appear in its source.
+                parts.append(node)
+            else:
+                break
+            node = node.getnext()
+        while parts and parts[-1].tag != qn("w:tbl"):
+            parts.pop()
+        if not any(part.tag == qn("w:tbl") for part in parts):
+            continue
+        table = parts[0]
+        try:
+            png_path, width = _render_figure_png(
+                _standalone_float_source(source_text, record["float"], "table"),
+                work_dir, source_dir, f"table{record['number']}")
+        except Exception as exc:
+            if on_warning:
+                on_warning(f"Table {record['number']}: kept as an editable table "
+                           f"because it could not be rendered ({exc}).")
+            continue
+        picture = document.add_paragraph()
+        picture.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        picture.add_run().add_picture(png_path, width=Inches(min(width, text_width)))
+        table.addprevious(picture._element)
+        for part in parts:
+            part.getparent().remove(part)
+        replaced.append(record["float"])
+    document.save(output_path)
+    return replaced
+
+
+_DISPLAY_MATH_ENVIRONMENTS = {
+    "equation", "equation*", "align", "align*", "gather", "gather*",
+    "multline", "multline*", "eqnarray", "eqnarray*", "displaymath",
+}
+
+
+def _display_math_blocks(source_text):
+    """Return display-math source blocks in document order, outside floats."""
+    body = source_text.split(r"\begin{document}", 1)[-1]
+    floats = _named_environment_ranges(body, {"figure", "figure*", "table", "table*"})
+    blocks = [(start, end) for start, end in
+              _named_environment_ranges(body, _DISPLAY_MATH_ENVIRONMENTS)]
+    environments = list(blocks)
+    for match in re.finditer(r"(?<!\\)\\\[(.*?)(?<!\\)\\\]", body, re.S):
+        if not _is_comment_offset(body, match.start()) and not any(
+                left <= match.start() < right for left, right in environments):
+            blocks.append((match.start(), match.end()))
+    blocks = [(start, end) for start, end in blocks
+              if not any(left <= start < right for left, right in floats)]
+    return [body[start:end] for start, end in sorted(blocks)]
+
+
+def _insert_equation_images(source_text, source_dir, output_path, work_dir, on_warning=None):
+    """Replace display equations with LaTeX-rendered pictures, in document order."""
+    blocks = _display_math_blocks(source_text)
+    if not blocks:
+        return 0
+    document = Document(output_path)
+    paragraphs = [element for element in document.element.body
+                  if element.tag == qn("w:p")
+                  and next(element.iter(qn("m:oMathPara")), None) is not None]
+    if len(paragraphs) != len(blocks):
+        if on_warning:
+            on_warning(f"Equations kept editable: source has {len(blocks)} display "
+                       f"equations but the DOCX has {len(paragraphs)}.")
+        return 0
+    preamble = source_text.split(r"\begin{document}", 1)[0]
+    macros = _body_macro_definitions(source_text)
+    section = document.sections[0]
+    text_width = (section.page_width - section.left_margin - section.right_margin) / 914400
+    replaced = 0
+    for number, (block, paragraph) in enumerate(zip(blocks, paragraphs), start=1):
+        tex_source = (preamble + "\\begin{document}\n" + macros + "\n\\pagestyle{empty}\n"
+                      "\\noindent\\begin{minipage}{\\textwidth}\n" + block
+                      + "\n\\end{minipage}\n\\end{document}\n")
+        try:
+            png_path, width = _render_figure_png(
+                tex_source, work_dir, source_dir, f"equation{number}")
+        except Exception as exc:
+            if on_warning:
+                on_warning(f"Equation {number}: kept editable because it could not "
+                           f"be rendered ({exc}).")
+            continue
+        picture = document.add_paragraph()
+        picture.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        picture.add_run().add_picture(png_path, width=Inches(min(width, text_width)))
+        paragraph.addprevious(picture._element)
+        paragraph.getparent().remove(paragraph)
+        replaced += 1
+    document.save(output_path)
+    return replaced
+
+
+def _place_references_like_source(source_text, output_path):
+    """Move the bibliography to where \\bibliography sits, e.g. before appendices.
+
+    Pandoc always appends citeproc references at the end of the document.
+    """
+    source = _strip_tex_comments(source_text)
+    bibliography = _BIBLIOGRAPHY_PATTERN.search(source)
+    appendix = re.search(r"\\appendix\b", source)
+    if not bibliography or not appendix or bibliography.start() > appendix.start():
+        return
+    document = Document(output_path)
+    body = document.element.body
+    entries = [paragraph for paragraph in document.paragraphs
+               if paragraph.style.name == "Bibliography"]
+    appendix_heading = next(
+        (paragraph for paragraph in document.paragraphs
+         if paragraph.style.name.startswith("Heading")
+         and paragraph.text.strip().startswith("Appendix")), None)
+    if not entries or appendix_heading is None:
+        return
+    first = entries[0]._element
+    last = entries[-1]._element
+    while first.getprevious() is not None and first.getprevious().tag == qn("w:bookmarkStart"):
+        first = first.getprevious()
+    while last.getnext() is not None and last.getnext().tag == qn("w:bookmarkEnd"):
+        last = last.getnext()
+    block = []
+    node = first
+    while node is not None:
+        block.append(node)
+        if node is last:
+            break
+        node = node.getnext()
+    anchor = appendix_heading._element
+    if not any(paragraph.text.strip() == "References"
+               and paragraph.style.name.startswith("Heading")
+               for paragraph in document.paragraphs):
+        heading = document.add_paragraph("References", style="Heading 1")
+        anchor.addprevious(heading._element)
+    for node in block:
+        anchor.addprevious(node)
+    document.save(output_path)
+
+
+_LEADING_PUNCTUATION = re.compile(r"^[.,;:!?)\]]+")
+
+
+def _attach_punctuation_to_links(output_path):
+    """Keep punctuation after a citation or cross-reference link on the same line.
+
+    Word may break the line between a hyperlink and the next run, which leaves
+    a full stop or comma at the start of the next line.
+    """
+    document = Document(output_path)
+    changed = False
+    for link in document.element.body.iter(qn("w:hyperlink")):
+        texts = list(link.iter(qn("w:t")))
+        following = link.getnext()
+        if not texts or following is None or following.tag != qn("w:r"):
+            continue
+        following_text = following.find(qn("w:t"))
+        if following_text is None or not following_text.text:
+            continue
+        match = _LEADING_PUNCTUATION.match(following_text.text)
+        if not match:
+            continue
+        texts[-1].text = (texts[-1].text or "") + match.group(0)
+        texts[-1].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        remainder = following_text.text[match.end():]
+        if remainder:
+            following_text.text = remainder
+        else:
+            following.getparent().remove(following)
+        changed = True
+    if changed:
+        document.save(output_path)
+
+
+def _audit_converted_document(source_text, source_dir, output_path, merged_figures=(),
+                              table_images=()):
     """Report concrete source content that did not survive into the DOCX."""
     document = Document(output_path)
     warnings = []
     docx_text = " ".join(node.text or "" for node in document.element.iter(qn("w:t")))
     source_tables = len(_named_environment_ranges(source_text, {"tabular", "tabularx"}))
+    source_tables -= sum(len(_named_environment_ranges(block, {"tabular", "tabularx"}))
+                         for block in list(merged_figures) + list(table_images)
+                         + [_body_macro_definitions(source_text)])
     output_tables = sum(1 for _ in document.element.iter(qn("w:tbl")))
     if output_tables < source_tables:
         warnings.append(
@@ -1987,10 +2461,12 @@ def _audit_converted_document(source_text, source_dir, output_path):
             warnings.append(f"Table {record['number']}: caption text is duplicated.")
 
     source_images = _source_image_paths(source_text)
+    expected_images = len(source_images) - sum(
+        len(_source_image_paths(block)) - 1 for block in merged_figures)
     output_images = len(document.inline_shapes)
-    if output_images < len(source_images):
+    if output_images < expected_images:
         warnings.append(
-            f"Figures: source references {len(source_images)} images; "
+            f"Figures: source references {expected_images} images; "
             f"DOCX embeds {output_images}.")
 
     for record in _figure_caption_records(source_text):
@@ -2004,6 +2480,8 @@ def _audit_converted_document(source_text, source_dir, output_path):
                 caption[:min(7, len(caption))] in _normalized_text(paragraph.text)
                 for paragraph in matches):
             warnings.append(f"{marker[:-1]}: caption text may be incomplete.")
+        if record["float"] in merged_figures:
+            continue
         for panel in _subfigure_caption_records(record):
             expected = _normalized_text(_plain_caption_text(panel["caption"]))
             if not any(
@@ -2039,7 +2517,7 @@ def _audit_converted_document(source_text, source_dir, output_path):
             warnings.append(f"Reference '{key}': its title is missing from the DOCX bibliography.")
 
     hyperlinks = {
-        node.get(qn("w:anchor")): _hyperlink_text(node)
+        node.get(qn("w:anchor")): re.sub(r"[.,;:!?)\]]+$", "", _hyperlink_text(node))
         for node in document.element.iter(qn("w:hyperlink"))
         if node.get(qn("w:anchor"))
     }
@@ -2060,8 +2538,14 @@ def _audit_converted_document(source_text, source_dir, output_path):
 
 
 def convert_latex_to_docx(source_path, destination_path, on_status=None, on_warning=None,
-                         on_progress=None):
-    """Convert a .tex source, reporting warnings and completed-stage progress."""
+                         on_progress=None, tables_as_images=False,
+                         equations_as_images=False):
+    """Convert a .tex source, reporting warnings and completed-stage progress.
+
+    With tables_as_images or equations_as_images, numbered tables or display
+    equations are inserted as pictures rendered by pdflatex instead of
+    editable Word tables or equations.
+    """
     source_path = os.path.abspath(source_path)
     destination_path = os.path.abspath(destination_path)
     if not os.path.isfile(source_path):
@@ -2080,7 +2564,7 @@ def convert_latex_to_docx(source_path, destination_path, on_status=None, on_warn
         nonlocal completed_stages
         completed_stages += 1
         if on_progress:
-            on_progress(round(completed_stages * 100 / 14))
+            on_progress(round(completed_stages * 100 / 20))
 
     def add_warning(message):
         message = str(message).strip()
@@ -2169,7 +2653,10 @@ def convert_latex_to_docx(source_path, destination_path, on_status=None, on_warn
                 add_warning(message)
         finish_stage()
 
+        merged_figures = []
+        table_images = []
         repairs = (
+            ("Title block", lambda: _restore_title_block(source_text, destination_path)),
             ("Table recovery", lambda: _restore_table_captions_and_missing_tables(
                 source_text, table_records, destination_path, source_dir,
                 reference_docx_path, temp_dir, on_warning=add_warning)),
@@ -2177,16 +2664,30 @@ def convert_latex_to_docx(source_path, destination_path, on_status=None, on_warn
                 source_text, destination_path)),
             ("Cross-references", lambda: _restore_cross_reference_numbers(
                 source_text, destination_path)),
+            ("References", lambda: _place_references_like_source(
+                source_text, destination_path)),
             ("Table widths", lambda: _preserve_latex_table_widths(
                 source_text, destination_path)),
             ("Wide figure panels", lambda: _preserve_wide_subfigure_tables(
                 source_text, destination_path)),
             ("Figure image sizing", lambda: _preserve_wide_subfigure_image_widths(
                 source_text, destination_path)),
+            ("Multi-panel figures", lambda: merged_figures.extend(
+                _insert_multi_panel_figures(source_text, source_dir, destination_path,
+                                            temp_dir, on_warning=add_warning))),
             ("Table formatting", lambda: _format_latex_tables(destination_path)),
             ("Table caption flow", lambda: _keep_table_captions_with_tables(
                 destination_path)),
             ("Nested table widths", lambda: _constrain_document_nested_tables(
+                destination_path)),
+            ("Table images", lambda: table_images.extend(
+                _insert_table_images(source_text, source_dir, destination_path,
+                                     temp_dir, on_warning=add_warning)
+                if tables_as_images else [])),
+            ("Equation images", lambda: _insert_equation_images(
+                source_text, source_dir, destination_path, temp_dir,
+                on_warning=add_warning) if equations_as_images else None),
+            ("Punctuation after links", lambda: _attach_punctuation_to_links(
                 destination_path)),
         )
         for operation, repair in repairs:
@@ -2200,7 +2701,8 @@ def convert_latex_to_docx(source_path, destination_path, on_status=None, on_warn
         report_status("Checking DOCX content...")
         try:
             for message in _audit_converted_document(
-                    source_text, source_dir, destination_path):
+                    source_text, source_dir, destination_path, merged_figures,
+                    table_images):
                 add_warning(message)
         except Exception as exc:
             add_warning(f"DOCX content audit could not finish: {exc}")
